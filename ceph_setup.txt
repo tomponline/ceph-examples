@@ -1,0 +1,154 @@
+https://docs.ceph.com/en/quincy/install/manual-deployment/
+
+ceph-mon01 (10.96.75.11):
+---------------------------------
+sudo apt-get update && sudo apt install nano wget
+wget -q -O- 'https://download.ceph.com/keys/release.asc' | sudo apt-key add -
+sudo apt-add-repository 'deb https://download.ceph.com/debian-quincy/ focal main'
+sudo apt-get install ceph ceph-mds -y --no-install-suggests --no-install-recommends
+
+uuidgen # Generate fsid of cluster (5662ef35-4ea4-4a6d-b6b2-819331802851)
+
+Create /etc/ceph/ceph.conf:
+[global]
+fsid = 5662ef35-4ea4-4a6d-b6b2-819331802851
+mon initial members = ceph-mon01
+mon host = 10.96.75.11
+osd pool default size = 2
+osd pool default min size = 2
+
+sudo ceph-authtool --create-keyring /tmp/ceph.mon.keyring --gen-key -n mon. --cap mon 'allow *'
+sudo ceph-authtool --create-keyring /etc/ceph/ceph.client.admin.keyring --gen-key -n client.admin --cap mon 'allow *' --cap osd 'allow *' --cap mds 'allow *' --cap mgr 'allow *'
+sudo ceph-authtool --create-keyring /var/lib/ceph/bootstrap-osd/ceph.keyring --gen-key -n client.bootstrap-osd --cap mon 'profile bootstrap-osd' --cap mgr 'allow r'
+sudo ceph-authtool /tmp/ceph.mon.keyring --import-keyring /etc/ceph/ceph.client.admin.keyring
+sudo ceph-authtool /tmp/ceph.mon.keyring --import-keyring /var/lib/ceph/bootstrap-osd/ceph.keyring
+sudo chown ceph:ceph /tmp/ceph.mon.keyring
+sudo monmaptool --create --add ceph-mon01 10.96.75.11 --fsid 5662ef35-4ea4-4a6d-b6b2-819331802851 /tmp/monmap
+sudo mkdir /var/lib/ceph/mon/ceph-ceph-mon01
+sudo chown ceph:ceph /var/lib/ceph/mon/ceph-ceph-mon01
+sudo -u ceph ceph-mon --cluster ceph --mkfs -i ceph-mon01 --monmap /tmp/monmap --keyring /tmp/ceph.mon.keyring
+sudo ceph mon enable-msgr2
+sudo ceph config set mon auth_allow_insecure_global_id_reclaim false
+sudo systemctl enable --now ceph-mon@ceph-mon01
+
+sudo ceph -s
+
+sudo -u ceph mkdir /var/lib/ceph/mgr/ceph-ceph-mon01
+sudo ceph auth get-or-create mgr.ceph-mon01 mon 'allow profile mgr' osd 'allow *' mds 'allow *' > /var/lib/ceph/mgr/ceph-ceph-mon01/keyring
+sudo systemctl enable --now ceph-mgr@ceph-mon01
+
+sudo ceph -s
+  cluster:
+    id:     5662ef35-4ea4-4a6d-b6b2-819331802851
+    health: HEALTH_WARN
+            OSD count 0 < osd_pool_default_size 3
+ 
+  services:
+    mon: 1 daemons, quorum ceph-mon01 (age 11s)
+    mgr: no daemons active (since 1.8348s)
+    osd: 0 osds: 0 up, 0 in
+ 
+  data:
+    pools:   0 pools, 0 pgs
+    objects: 0 objects, 0 B
+    usage:   0 B used, 0 B / 0 B avail
+    pgs:     
+
+
+ceph-osd01 (10.96.75.12):
+---------------------------------
+sudo apt-get update && sudo apt install nano wget
+wget -q -O- 'https://download.ceph.com/keys/release.asc' | sudo apt-key add -
+sudo apt-add-repository 'deb https://download.ceph.com/debian-quincy/ focal main'
+sudo apt-get install ceph ceph-mds ceph-volume -y --no-install-suggests --no-install-recommends
+
+Copy /etc/ceph/ceph.conf and /var/lib/ceph/bootstrap-osd/ceph.keyring to ceph-osd01.
+
+sudo ceph-volume lvm create --data /dev/sdb
+sudo ceph-volume lvm list
+sudo ceph-volume lvm activate 0 {osd fsid}
+
+ceph-osd02 (10.96.75.13):
+---------------------------------
+sudo apt-get update && sudo apt install nano wget
+wget -q -O- 'https://download.ceph.com/keys/release.asc' | sudo apt-key add -
+sudo apt-add-repository 'deb https://download.ceph.com/debian-quincy/ focal main'
+sudo apt-get install ceph ceph-mds ceph-volume -y --no-install-suggests --no-install-recommends
+
+Copy /etc/ceph/ceph.conf and /var/lib/ceph/bootstrap-osd/ceph.keyring to ceph-osd02.
+
+sudo ceph-volume lvm create --data /dev/sdb
+sudo ceph-volume lvm list
+sudo ceph-volume lvm activate 1 {osd fsid}
+
+ceph-mon01 (10.96.75.11):
+
+sudo ceph -s
+  cluster:
+    id:     5662ef35-4ea4-4a6d-b6b2-819331802851
+    health: HEALTH_OK
+ 
+  services:
+    mon: 1 daemons, quorum ceph-mon01 (age 95s)
+    mgr: ceph-mon01(active, since 72s)
+    osd: 2 osds: 2 up (since 11s), 2 in (since 4m)
+ 
+  data:
+    pools:   1 pools, 1 pgs
+    objects: 2 objects, 577 KiB
+    usage:   29 MiB used, 20 GiB / 20 GiB avail
+    pgs:     1 active+clean
+    
+Connect LXD hosts:
+---------------------------------
+Copy /etc/ceph/ceph.conf and /etc/ceph/ceph.client.admin.keyring to /etc/ceph on the LXD server.
+lxc storage create ceph ceph
+
+On ceph-mon01:
+ceph osd lspools # Check the LXD ceph pool was created
+rbd ls --pool ceph # Check volumes created by LXD
+
+Crash management:
+---------------------------------
+ceph crash ls
+ceph crash info <id>
+ceph crash archive <id>
+ceph crash archive-all
+
+Ceph Dashboard
+---------------------------------
+sudo apt install ceph-mgr-dashboard --no-install-suggests --no-install-recommends
+ceph mgr module enable dashboard
+ceph dashboard create-self-signed-cert
+ceph dashboard ac-user-create <username> administrator -i -
+Browse to https://10.96.75.11 and login as admin
+
+radosgw:
+---------------------------------
+https://www.youtube.com/watch?v=6uX23Q3y_SU
+https://gist.github.com/kalaspuffar/94b338168fe7200cb44b8111cb3172b3
+
+sudo apt install radosgw --no-install-suggests --no-install-recommends
+sudo mkdir -p /var/lib/ceph/radosgw/ceph-rgw.ceph-mon01
+sudo ceph auth get-or-create client.rgw.ceph-mon01 osd 'allow rwx' mon 'allow rw' -o /var/lib/ceph/radosgw/ceph-rgw.ceph-mon01/keyring
+
+Add to /etc/ceph/ceph.conf:
+
+[client.rgw.ceph-mon01]
+host = ceph-mon01
+keyring = /var/lib/ceph/radosgw/ceph-rgw.ceph-mon01/keyring
+log file = /var/log/ceph/ceph-rgw-n1.log
+rgw frontends = "beast endpoint=10.96.75.11:8080"
+rgw thread pool size = 512
+
+sudo systemctl enable ceph-radosgw@rgw.ceph-mon01 --now
+
+Use ceph osd lspools to show rgw pools created
+sudo radosgw-admin realm list
+
+curl http://10.96.75.11:8080
+<?xml version="1.0" encoding="UTF-8"?><ListAllMyBucketsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Owner><ID>anonymous</ID><DisplayName></DisplayName></Owner><Buckets></Buckets></ListAllMyBucketsResult>
+
+radosgw-admin
+https://docs.ceph.com/en/latest/radosgw/multisite/#create-a-system-user
+
