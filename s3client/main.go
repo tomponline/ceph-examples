@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -35,23 +36,25 @@ type Key struct {
 func removeUser(user string) error {
 	cmd := exec.Command("radosgw-admin", "user", "rm", "--purge-data", fmt.Sprintf("--uid=%s", user))
 	_, err := cmd.Output()
+	if err != nil {
+		if exiterr, ok := err.(*exec.ExitError); ok {
+			return fmt.Errorf(string(exiterr.Stderr))
+		}
 
-	if exiterr, ok := err.(*exec.ExitError); ok {
-		return fmt.Errorf(string(exiterr.Stderr))
+		return err
 	}
 
-	return err
+	return nil
 }
 
 func addUser(user string, buckets int) (*Key, error) {
 	cmd := exec.Command("radosgw-admin", "user", "create", fmt.Sprintf("--max-buckets=%d", buckets), fmt.Sprintf("--display-name=%s", user), fmt.Sprintf("--uid=%s", user))
 	buf, err := cmd.Output()
-
-	if exiterr, ok := err.(*exec.ExitError); ok {
-		return nil, fmt.Errorf(string(exiterr.Stderr))
-	}
-
 	if err != nil {
+		if exiterr, ok := err.(*exec.ExitError); ok {
+			return nil, fmt.Errorf(string(exiterr.Stderr))
+		}
+
 		return nil, err
 	}
 
@@ -76,12 +79,11 @@ func addUser(user string, buckets int) (*Key, error) {
 func addSubUser(user string, subuser string, access string) (*Key, error) {
 	cmd := exec.Command("radosgw-admin", "subuser", "create", "--gen-access-key", "--key-type=s3", fmt.Sprintf("--uid=%s", user), fmt.Sprintf("--subuser=%s", subuser), fmt.Sprintf("--access=%s", access))
 	buf, err := cmd.Output()
-
-	if exiterr, ok := err.(*exec.ExitError); ok {
-		return nil, fmt.Errorf(string(exiterr.Stderr))
-	}
-
 	if err != nil {
+		if exiterr, ok := err.(*exec.ExitError); ok {
+			return nil, fmt.Errorf(string(exiterr.Stderr))
+		}
+
 		return nil, err
 	}
 
@@ -106,12 +108,39 @@ func addSubUser(user string, subuser string, access string) (*Key, error) {
 func bucketLink(bucket string, user string) error {
 	cmd := exec.Command("radosgw-admin", "bucket", "link", fmt.Sprintf("--bucket=%s", bucket), fmt.Sprintf("--uid=%s", user))
 	_, err := cmd.Output()
+	if err != nil {
+		if exiterr, ok := err.(*exec.ExitError); ok {
+			return fmt.Errorf(string(exiterr.Stderr))
+		}
 
-	if exiterr, ok := err.(*exec.ExitError); ok {
-		return fmt.Errorf(string(exiterr.Stderr))
+		return err
 	}
 
-	return err
+	return nil
+}
+
+func bucketQuota(user string, size string) error {
+	cmd := exec.Command("radosgw-admin", "quota", "set", "--quota-scope=bucket", fmt.Sprintf("--uid=%s", user), fmt.Sprintf("--max-size=%s", size))
+	_, err := cmd.Output()
+	if err != nil {
+		if exiterr, ok := err.(*exec.ExitError); ok {
+			return fmt.Errorf(string(exiterr.Stderr))
+		}
+
+		return err
+	}
+
+	cmd = exec.Command("radosgw-admin", "quota", "enable", "--quota-scope=bucket", fmt.Sprintf("--uid=%s", user))
+	_, err = cmd.Output()
+	if err != nil {
+		if exiterr, ok := err.(*exec.ExitError); ok {
+			return fmt.Errorf(string(exiterr.Stderr))
+		}
+
+		return err
+	}
+
+	return nil
 }
 
 func client(accessKey string, accessSecret string) *minio.Client {
@@ -284,6 +313,32 @@ func main() {
 	}
 
 	fmt.Println("Changed ownership of mybucket to testwrite user")
+
+	err = bucketQuota("testwrite2", "1M")
+	if err != nil {
+		log.Fatalln("Failed setting bucket quota for testwrite user", err)
+	}
+
+	fmt.Println("Set bucket quota for testwrite user to 1MiB")
+
+	// Check cannot create bucket as testwrite user after quota enabled.
+	err = testUserWrite.MakeBucket(context.Background(), "mybucket3", minio.MakeBucketOptions{})
+	if err == nil {
+		log.Fatalln("testwrite shouldn't be able to create buckets")
+	}
+
+	// Check cannot put object as testwrite user into bucket owned by testwrite user if would exceed quota.
+	err = putObject(testUserWrite, "mybucket")
+	if err == nil || !strings.Contains(err.Error(), "QuotaExceeded") {
+		log.Fatalln("Shouldn't be able to put object as quota should be exceeded")
+	}
+
+	err = bucketQuota("testwrite2", "20M")
+	if err != nil {
+		log.Fatalln("Failed setting bucket quota for testwrite user", err)
+	}
+
+	fmt.Println("Set bucket quota for testwrite user to 20MiB")
 
 	// Put object as testwrite user into bucket owned by testwrite user.
 	err = putObject(testUserWrite, "mybucket")
