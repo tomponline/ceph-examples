@@ -312,6 +312,14 @@ func main() {
 		log.Fatalln("Failed changing ownership of mybucket to testwrite user", err)
 	}
 
+	buckets, err := testUserWrite.ListBuckets(context.Background())
+	if err != nil {
+		log.Fatalln("Failed listing buckets as testwrite user", err)
+	}
+	if len(buckets) != 1 || buckets[0].Name != "mybucket" {
+		log.Fatal("Unexpected buckets in list", buckets)
+	}
+
 	fmt.Println("Changed ownership of mybucket to testwrite user")
 
 	err = bucketQuota("testwrite2", "1M")
