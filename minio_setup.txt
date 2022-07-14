@@ -1,0 +1,15 @@
+Install deb packages from:
+
+https://dl.min.io/client/mc/release/linux-amd64/
+https://dl.min.io/server/minio/release/linux-amd64/
+
+Run server:
+
+mkdir /home/user/minio-data
+MINIO_ROOT_USER=minioadmin  MINIO_ROOT_PASSWORD=minioadmin \
+ minio server /home/user/minio-data/ --address=127.0.0.1:9000 --console-address=127.0.0.1:9080
+
+Configure client:
+
+mcli alias set local http://127.0.0.1:9000 minioadmin minioadmin
+mcli admin info local
