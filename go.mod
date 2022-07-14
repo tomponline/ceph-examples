@@ -1,4 +1,4 @@
-module s3client
+module github.com/tomponline/ceph-examples
 
 go 1.18
 
