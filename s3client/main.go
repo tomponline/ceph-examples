@@ -1,3 +1,12 @@
+/*
+This program is for experimenting with Ceph RadosGW access controls.
+It performs the following steps:
+1. Creates a lxdadmin user that can create buckets.
+2. Creates a testuser user that cannot create buckets, with a read subuser.
+3. Creates a bucket as lxdadmin user and then changes ownership of it to testuser.
+4. Performs various operations to check that testuser and testuser:read cannot do actions they shouldn't.
+*/
+
 package main
 
 import (
@@ -55,7 +64,54 @@ func addUser(user string, buckets int) (*Key, error) {
 		return nil, err
 	}
 
-	return &info.Keys[0], nil
+	for _, key := range info.Keys {
+		if key.User == user {
+			return &key, err
+		}
+	}
+
+	return nil, fmt.Errorf("Key not found")
+}
+
+func addSubUser(user string, subuser string, access string) (*Key, error) {
+	cmd := exec.Command("radosgw-admin", "subuser", "create", "--gen-access-key", "--key-type=s3", fmt.Sprintf("--uid=%s", user), fmt.Sprintf("--subuser=%s", subuser), fmt.Sprintf("--access=%s", access))
+	buf, err := cmd.Output()
+
+	if exiterr, ok := err.(*exec.ExitError); ok {
+		return nil, fmt.Errorf(string(exiterr.Stderr))
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	info := struct {
+		Keys []Key `json:"keys"`
+	}{}
+
+	err = json.Unmarshal(buf, &info)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, key := range info.Keys {
+		if key.User == fmt.Sprintf("%s:%s", user, subuser) {
+			return &key, err
+		}
+	}
+
+	return nil, fmt.Errorf("Key not found")
+}
+
+func bucketLink(bucket string, user string) error {
+	cmd := exec.Command("radosgw-admin", "bucket", "link", fmt.Sprintf("--bucket=%s", bucket), fmt.Sprintf("--uid=%s", user))
+	_, err := cmd.Output()
+
+	if exiterr, ok := err.(*exec.ExitError); ok {
+		return fmt.Errorf(string(exiterr.Stderr))
+	}
+
+	return err
 }
 
 func client(accessKey string, accessSecret string) *minio.Client {
@@ -71,60 +127,22 @@ func client(accessKey string, accessSecret string) *minio.Client {
 	return minioClient
 }
 
-func setBucketPolicy(client *minio.Client, allowAuthGet bool, allowAnonymousGet bool) error {
-	otherAccess := ""
-	if allowAnonymousGet {
-		// Allow all users (including anonymous) to GET objects in bucket.
-		otherAccess = `,{
-				"Effect": "Allow",
-				"Principal": "*",
-				"Action": [
-					"s3:GetObject",
-					"s3:GetObjectVersion"
-				],
-				"Resource": [
-					"arn:aws:s3:::mybucket/*"
-				]
-			}`
-	} else if allowAuthGet {
-		// Allow the testread user to GET objects in bucket.
-		otherAccess = `,{
-				"Effect": "Allow",
-				"Principal": {
-					"AWS": ["arn:aws:iam:::user/testread"]
-				},
-				"Action": [
-					"s3:GetObject",
-					"s3:GetObjectVersion"
-				],
-				"Resource": [
-					"arn:aws:s3:::mybucket/*"
-				]
-			}`
-	}
-
+func setBucketPolicy(client *minio.Client) error {
 	// The default bucket policy just allows the testwrite user to GET/PUT/DELETE objects in bucket.
-	policy := fmt.Sprintf(`{
+	policy := `{
 		"Version": "2012-10-17",
 		"Statement": [{
-				"Effect": "Allow",
-				"Principal": {
-					"AWS": ["arn:aws:iam:::user/testwrite"]
-				},
-				"Action": [
-					"s3:GetObject",
-					"s3:GetObjectVersion",
-					"s3:PutObject",
-					"s3:DeleteObject"
-				],
-				"Resource": [
-					"arn:aws:s3:::mybucket/*"
-				]
-			}%s
-		]
-	}`, otherAccess)
-
-	fmt.Println(policy)
+			"Effect": "Allow",
+			"Principal": "*",
+			"Action": [
+				"s3:GetObject",
+				"s3:GetObjectVersion"
+			],
+			"Resource": [
+				"arn:aws:s3:::mybucket/*"
+			]
+		}]
+	}`
 
 	return client.SetBucketPolicy(context.Background(), "mybucket", policy)
 }
@@ -195,12 +213,17 @@ func getObjectAnonymous(bucket string) error {
 	return err
 }
 
+func removeBucket(client *minio.Client, bucket string) error {
+	return client.RemoveBucket(context.Background(), bucket)
+}
+
 func main() {
 	// Setup radosgw users.
 	removeUser("lxdadmin")
 	removeUser("testread")
-	removeUser("testwrite")
+	removeUser("testwrite2")
 
+	// Create LXD admin user which is allowed to create buckets.
 	adminKey, err := addUser("lxdadmin", 0)
 	if err != nil {
 		log.Fatalln("Failed creating lxdadmin user", err)
@@ -210,46 +233,34 @@ func main() {
 
 	fmt.Printf("Created lxdadmin user: %+v\n", adminKey)
 
-	testUserReadKey, err := addUser("testread", -1)
-	if err != nil {
-		log.Fatalln("Failed creating testread user", err)
-	}
-
-	testUserRead := client(testUserReadKey.AccessKey, testUserReadKey.SecretKey)
-
-	fmt.Printf("Created testread user: %+v\n", adminKey)
-
-	testUserWriteKey, err := addUser("testwrite", -1)
+	testUserWriteKey, err := addUser("testwrite2", -1)
 	if err != nil {
 		log.Fatalln("Failed creating testwrite user", err)
 	}
 
 	testUserWrite := client(testUserWriteKey.AccessKey, testUserWriteKey.SecretKey)
 
-	fmt.Printf("Created testwrite user: %+v\n", adminKey)
+	fmt.Printf("Created testwrite user: %+v\n", testUserWriteKey)
 
-	// Clean up state.
-	for _, bucketName := range []string{"mybucket", "mybucket2"} {
-		removeObject(adminUser, bucketName)
-		bucketExists, err := adminUser.BucketExists(context.Background(), bucketName)
-		if err != nil {
-			log.Fatalln("Failed checking mybucket exists", err)
-		}
-
-		if bucketExists {
-			err = adminUser.RemoveBucket(context.Background(), bucketName)
-			if err != nil {
-				log.Fatalf("Failed removing %s: %v\n", bucketName, err)
-			}
-
-			fmt.Printf("Removed %s\n", bucketName)
-		}
+	testUserReadKey, err := addSubUser("testwrite2", "read", "read")
+	if err != nil {
+		log.Fatalln("Failed creating testread user", err)
 	}
+
+	testUserRead := client(testUserReadKey.AccessKey, testUserReadKey.SecretKey)
+
+	fmt.Printf("Created testread user: %+v\n", testUserReadKey)
 
 	// Check cannot create bucket as testwrite user.
 	err = testUserWrite.MakeBucket(context.Background(), "mybucket", minio.MakeBucketOptions{})
 	if err == nil {
 		log.Fatalln("testwrite shouldn't be able to create buckets")
+	}
+
+	// Check cannot create bucket as testread user.
+	err = testUserRead.MakeBucket(context.Background(), "mybucket", minio.MakeBucketOptions{})
+	if err == nil {
+		log.Fatalln("testread shouldn't be able to create buckets")
 	}
 
 	// Create a mybucket owned by admin user.
@@ -266,62 +277,73 @@ func main() {
 
 	fmt.Println("Created buckets as admin user")
 
-	// Set bucket policy without anonymous access.
-	err = setBucketPolicy(adminUser, false, false)
+	// Change ownership of mybucket to testwrite.
+	err = bucketLink("mybucket", "testwrite2")
 	if err != nil {
-		log.Fatalln("Failed setting mybucket policy by admin user", err)
+		log.Fatalln("Failed changing ownership of mybucket to testwrite user", err)
 	}
 
-	fmt.Println("Admin set mybucket policy without anonymous access")
+	fmt.Println("Changed ownership of mybucket to testwrite user")
 
-	// Put object as admin user into buckets.
+	// Put object as testwrite user into bucket owned by testwrite user.
+	err = putObject(testUserWrite, "mybucket")
+	if err != nil {
+		log.Fatalln("Failed putting object into mybucket as testwrite user", err)
+	}
+
+	fmt.Println("Put myobject as testwrite user")
+
+	// Check lxdadmin user cannot put object into mybucket which is owned by testuser.
 	err = putObject(adminUser, "mybucket")
-	if err != nil {
-		log.Fatalln("Failed putting object into mybucket as admin user", err)
+	if err == nil {
+		log.Fatalln("Shouldn't be able to put object into mybucket as lxdadmin user")
 	}
 
+	// Check lxdadmin user can put object into mybucket2 which is owned by lxdadmin.
 	err = putObject(adminUser, "mybucket2")
 	if err != nil {
-		log.Fatalln("Failed putting object into mybucket2 as admin user", err)
+		log.Fatalln("Failed putting object into mybucket2 as lxdadmin user", err)
 	}
 
-	// Get object upload by admin as testwrite user.
+	fmt.Println("Put myobject2 as lxdadmin user")
+
+	// Get object uploaded by testwrite into bucket owned by testwrite as testwrite user.
 	err = getObject(testUserWrite, "mybucket")
 	if err != nil {
 		log.Fatalln("Failed getting object as testwrite user", err)
 	}
 
-	// Get object upload by admin as testwrite user.
+	// Check can't get object in mybucket2 owned by lxdadmin user as testwrite user.
 	err = getObject(testUserWrite, "mybucket2")
 	if err == nil {
 		log.Fatalln("Shouldn't be able to get object from mybucket2 as testwrite user")
 	}
 
-	// Get object uploaded by admin as testread user.
+	// Check can't get object in mybucket2 owned by lxdadmin user as testread user.
 	err = getObject(testUserRead, "mybucket2")
 	if err == nil {
 		log.Fatalln("Shouldn't be able to get object from mybucket2 as testread user")
 	}
 
-	// Test anonymous access.
+	// Check can't get object in mybucket2 owned by lxdadmin user as anonymous user.
 	err = getObjectAnonymous("mybucket2")
 	if err == nil {
 		log.Fatalln("Anonymous user shouldn't be able to get object from mybucket2")
 	}
 
-	// Put object as testwrite user.
+	// Check can't put object in mybucket2 owned by lxdadmin user as testwrite user.
 	err = putObject(testUserWrite, "mybucket2")
 	if err == nil {
 		log.Fatalln("Shouldn't be able to put object into mybucket2 as testwrite user")
 	}
 
-	// Put object as testwrite user.
+	// Check can't put object in mybucket2 owned by lxdadmin user as testread user.
 	err = putObject(testUserRead, "mybucket2")
 	if err == nil {
 		log.Fatalln("Shouldn't be able to put object into mybucket2 as testread user")
 	}
 
-	// Put object as testwrite user.
+	// Put object as testwrite user into bucket owned by testwrite user.
 	err = putObject(testUserWrite, "mybucket")
 	if err != nil {
 		log.Fatalln("Failed putting object as testwrite user", err)
@@ -338,26 +360,8 @@ func main() {
 	fmt.Println("Got myobject as testwrite user")
 
 	// Get object as testread user.
-	err = getObject(testUserRead, "mybucket")
-	if err == nil {
-		log.Fatalln("testread user shouldn't be able to get myobject")
-	}
-
-	// Test anonymous access.
-	err = getObjectAnonymous("mybucket")
-	if err == nil {
-		log.Fatalln("Anonymous user shouldn't be able to get myobject")
-	}
-
-	// Set bucket policy without testread user access.
-	err = setBucketPolicy(adminUser, true, false)
-	if err != nil {
-		log.Fatalln("Failed setting mybucket policy by admin user", err)
-	}
-
-	fmt.Println("Admin set mybucket policy with testread access")
-
-	// Get object as testread user.
+	// Although this appears to be a different user, in ceph radosgw world, it is owned by the same underlying
+	// user as the testwrite user, and it appears that you can always get the objects you put.
 	err = getObject(testUserRead, "mybucket")
 	if err != nil {
 		log.Fatalln("Failed getting object as testread user", err)
@@ -365,19 +369,25 @@ func main() {
 
 	fmt.Println("Got myobject as testread user")
 
-	// Test anonymous access.
+	// Check can't get object in mybucket owned by testwrite user as anonymous user.
 	err = getObjectAnonymous("mybucket")
 	if err == nil {
 		log.Fatalln("Anonymous user shouldn't be able to get myobject")
 	}
 
-	// Set bucket policy with anonymous access.
-	err = setBucketPolicy(adminUser, false, true)
-	if err != nil {
-		log.Fatalln("Failed setting mybucket policy by admin user", err)
+	// Check testread user cannot set bucket policy (even on buckets owned by same underlying user).
+	err = setBucketPolicy(testUserRead)
+	if err == nil {
+		log.Fatalln("Shouldn't be able to set bucket policy as testread user", err)
 	}
 
-	fmt.Println("Admin set mybucket policy with anonymous access")
+	// Set bucket policy to allow anonymous get access.
+	err = setBucketPolicy(testUserWrite)
+	if err != nil {
+		log.Fatalln("Failed setting mybucket anonymous access policy by testwrite user", err)
+	}
+
+	fmt.Println("Set mybucket policy with anonymous access by testwrite user")
 
 	// Get object as testwrite user.
 	err = getObject(testUserWrite, "mybucket")
@@ -403,7 +413,7 @@ func main() {
 
 	fmt.Println("Got myobject as anonymous user")
 
-	// Remove object as testread user.
+	// Check can't remove object from mybucket as testread user even though owned by the same underlying user.
 	err = removeObject(testUserRead, "mybucket")
 	if err == nil {
 		log.Fatalln("Shouldn't be able to remove myobject as testread user")
@@ -416,4 +426,24 @@ func main() {
 	}
 
 	fmt.Println("Removed myobject as testwrite user")
+
+	// Check testread user cannot remove mybucket.
+	err = removeBucket(testUserRead, "mybucket")
+	if err == nil {
+		log.Fatalln("Shouldn't be able to remove mybucket as testread user")
+	}
+
+	// Check testwrite user can remove mybucket.
+	err = removeBucket(testUserWrite, "mybucket")
+	if err != nil {
+		log.Fatalln("Failed removing object as testwrite user", err)
+	}
+
+	fmt.Println("Removed mybucket as testwrite user")
+
+	// Check testwrite user cannot remove mybucket2.
+	err = removeBucket(testUserWrite, "mybucket2")
+	if err == nil {
+		log.Fatalln("Shouldn't be able to remove mybucket2 as testwrite user")
+	}
 }
