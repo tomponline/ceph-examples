@@ -262,9 +262,14 @@ func main() {
 
 	fmt.Printf("Created lxdadmin user: %+v\n", adminKey)
 
-	testUserWriteKey, err := addUser("testwrite2", -1)
+	_, err = addUser("testwrite2", -1)
 	if err != nil {
 		log.Fatalln("Failed creating testwrite user", err)
+	}
+
+	testUserWriteKey, err := addSubUser("testwrite2", "write", "full")
+	if err != nil {
+		log.Fatalln("Failed creating testread user", err)
 	}
 
 	testUserWrite := client(testUserWriteKey.AccessKey, testUserWriteKey.SecretKey)
