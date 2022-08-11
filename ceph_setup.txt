@@ -29,12 +29,14 @@ sudo chown ceph:ceph /var/lib/ceph/mon/ceph-ceph-mon01
 sudo -u ceph ceph-mon --cluster ceph --mkfs -i ceph-mon01 --monmap /tmp/monmap --keyring /tmp/ceph.mon.keyring
 sudo ceph mon enable-msgr2
 sudo ceph config set mon auth_allow_insecure_global_id_reclaim false
+sudo systemctl enable --now ceph-mon.target
 sudo systemctl enable --now ceph-mon@ceph-mon01
 
 sudo ceph -s
 
 sudo -u ceph mkdir /var/lib/ceph/mgr/ceph-ceph-mon01
 sudo ceph auth get-or-create mgr.ceph-mon01 mon 'allow profile mgr' osd 'allow *' mds 'allow *' > /var/lib/ceph/mgr/ceph-ceph-mon01/keyring
+sudo systemctl enable --now ceph-mgr.target
 sudo systemctl enable --now ceph-mgr@ceph-mon01
 
 sudo ceph -s
@@ -141,6 +143,7 @@ log file = /var/log/ceph/ceph-rgw-n1.log
 rgw frontends = "beast endpoint=10.96.75.11:8080"
 rgw thread pool size = 512
 
+sudo systemctl enable ceph-radosgw.target --now
 sudo systemctl enable ceph-radosgw@rgw.ceph-mon01 --now
 
 Use ceph osd lspools to show rgw pools created
