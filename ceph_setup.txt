@@ -29,6 +29,7 @@ sudo chown ceph:ceph /var/lib/ceph/mon/ceph-ceph-mon01
 sudo -u ceph ceph-mon --cluster ceph --mkfs -i ceph-mon01 --monmap /tmp/monmap --keyring /tmp/ceph.mon.keyring
 sudo ceph mon enable-msgr2
 sudo ceph config set mon auth_allow_insecure_global_id_reclaim false
+sudo ceph config set mon mon_allow_pool_delete true
 sudo systemctl enable --now ceph-mon.target
 sudo systemctl enable --now ceph-mon@ceph-mon01
 
